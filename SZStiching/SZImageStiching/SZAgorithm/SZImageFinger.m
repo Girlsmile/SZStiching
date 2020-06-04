@@ -25,25 +25,163 @@
     return finger;
 }
 
+//- (void)fingerImage:(UIImage *)image{
+//    _lines = [NSMutableArray array];
+//    if (self.type == SZImageFingerTypeCRC) {
+//        CFAbsoluteTime time = CFAbsoluteTimeGetCurrent();
+//        [self crcFingerImage:image];
+//        CFAbsoluteTime nextTime = CFAbsoluteTimeGetCurrent() - time;
+//        NSLog(@"mini提取指纹耗费时间：%@",@(nextTime));
+//    }
+//    else if (self.type == SZImageFingerTypeMin){
+//        CFAbsoluteTime time = CFAbsoluteTimeGetCurrent();
+//        [self minMutlQueueFingerImage:image];
+//        CFAbsoluteTime nextTime = CFAbsoluteTimeGetCurrent() - time;
+//        NSLog(@"crc提取指纹耗费时间：%@",@(nextTime));
+//    }
+////    else if (self.type == SZImageFingerType32Min){
+////        [self min32FingerImage:image];
+////    }
+//
+//}
+
+// pixBuffer
+
 - (void)fingerImage:(UIImage *)image{
     _lines = [NSMutableArray array];
-    if (self.type == SZImageFingerTypeCRC) {
-        CFAbsoluteTime time = CFAbsoluteTimeGetCurrent();
-        [self crcFingerImage:image];
-        CFAbsoluteTime nextTime = CFAbsoluteTimeGetCurrent() - time;
-        NSLog(@"mini提取指纹耗费时间：%@",@(nextTime));
-    }
-    else if (self.type == SZImageFingerTypeMin){
-        CFAbsoluteTime time = CFAbsoluteTimeGetCurrent();
-        [self minMutlQueueFingerImage:image];
-        CFAbsoluteTime nextTime = CFAbsoluteTimeGetCurrent() - time;
-        NSLog(@"crc提取指纹耗费时间：%@",@(nextTime));
-    }
-//    else if (self.type == SZImageFingerType32Min){
-//        [self min32FingerImage:image];
-//    }
-
+    CFAbsoluteTime time = CFAbsoluteTimeGetCurrent();
+    CVPixelBufferRef buffer = [self pixelBufferFromCGImage: image.CGImage];
+    
+    [self crcMinBuffer: buffer];
+    
+    //        [self crcFingerImage:image];
+    CFAbsoluteTime nextTime = CFAbsoluteTimeGetCurrent() - time;
+    NSLog(@"mini提取指纹耗费时间：%@",@(nextTime));
 }
+
+
+- (void)crcMinBuffer:(CMSampleBufferRef)videoSample {
+    @autoreleasepool {
+        NSMutableArray *array = [NSMutableArray array];
+        //        CFDataRef pixelData = CGDataProviderCopyData(CGImageGetDataProvider(image.CGImage));
+        
+        CMBlockBufferRef blockBufferRef = CMSampleBufferGetDataBuffer(videoSample);
+        size_t length = CMBlockBufferGetDataLength(blockBufferRef);
+        Byte buffer[length];
+        CMBlockBufferCopyDataBytes(blockBufferRef, 0, length, buffer);
+        NSData *nsdata = [NSData dataWithBytes:buffer length:length];
+        CFDataRef pixelData = CFDataCreate(NULL, [nsdata bytes], [nsdata length]);
+        
+        CVImageBufferRef imageBuffer = CMSampleBufferGetImageBuffer(videoSample);
+        
+        const UInt8* data = CFDataGetBytePtr(pixelData);
+        NSInteger height = CVPixelBufferGetWidth(imageBuffer);
+        NSInteger width = CVPixelBufferGetHeight(imageBuffer);
+        NSInteger alla = CFDataGetLength(pixelData);
+        NSInteger scale = alla/(height*width);
+        for (NSInteger y = 0; y < height; y++)
+        {
+            NSMutableDictionary *map = [[NSMutableDictionary alloc] init];
+            for (NSInteger x = 0; x < width; x++)
+            {
+                if (x % 4 == 0) {
+                    const UInt8 *pixel = &(data[y * width * scale + x * scale]);
+                    int32_t gray = 0.3 * pixel[3] + 0.59 * pixel[2] + 0.11 * pixel[1];
+                    
+                    const UInt8 *pixel_next = &(data[y * width * scale + (x+16) * scale]);
+                    int32_t gray_next = 0.3 * pixel_next[3] + 0.59 * pixel_next[2] + 0.11 * pixel_next[1];
+                    
+                    if (map[@(gray)] == nil)
+                    {
+                        map[@(gray)] = @(1);
+                    }
+                    else
+                    {
+                        map[@(gray)] = @([map[@(gray)] integerValue] + 1);
+                    }
+                    
+                    if (map[@(gray_next)] == nil)
+                    {
+                        map[@(gray_next)] = @(1);
+                    }
+                    else
+                    {
+                        map[@(gray_next)] = @([map[@(gray_next)] integerValue] + 1);
+                    }
+                }
+                
+            }
+            NSMutableArray *numbers = [NSMutableArray array];
+            for (NSNumber *key in map.allKeys)
+            {
+                NSValue *value = [NSValue valueWithRange:NSMakeRange([key integerValue], [map[key] integerValue])];
+                [numbers addObject:value];
+            }
+            
+            NSInteger count = [numbers count];
+            NSInteger averge = 0;
+            NSInteger sum = 0;
+            for (NSInteger i = 0; i < count; i++)
+            {
+                NSInteger value = [numbers[i] rangeValue].location;
+                sum += value;
+            }
+            averge = sum/count;
+            [array addObject:@(averge)];
+        }
+        _lines = array;
+        CFRelease(pixelData);
+    }
+}
+
+- (CVPixelBufferRef) pixelBufferFromCGImage: (CGImageRef) image
+{
+    NSDictionary *options = @{
+        (NSString*)kCVPixelBufferCGImageCompatibilityKey : @YES,
+        (NSString*)kCVPixelBufferCGBitmapContextCompatibilityKey : @YES,
+        (NSString*)kCVPixelBufferIOSurfacePropertiesKey: [NSDictionary dictionary]
+    };
+    
+    CVPixelBufferRef pxbuffer = NULL;
+    CGFloat frameWidth = CGImageGetWidth(image);
+    CGFloat frameHeight = CGImageGetHeight(image);
+    
+    CVReturn status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                          frameWidth,
+                                          frameHeight,
+                                          kCVPixelFormatType_32BGRA,
+                                          (__bridge CFDictionaryRef) options,
+                                          &pxbuffer);
+    
+    NSParameterAssert(status == kCVReturnSuccess && pxbuffer != NULL);
+    
+    CVPixelBufferLockBaseAddress(pxbuffer, 0);
+    void *pxdata = CVPixelBufferGetBaseAddress(pxbuffer);
+    NSParameterAssert(pxdata != NULL);
+    CGColorSpaceRef rgbColorSpace = CGColorSpaceCreateDeviceRGB();
+    
+    CGContextRef context = CGBitmapContextCreate(pxdata,
+                                                 frameWidth,
+                                                 frameHeight,
+                                                 8,
+                                                 CVPixelBufferGetBytesPerRow(pxbuffer),
+                                                 rgbColorSpace,
+                                                 (CGBitmapInfo)kCGImageAlphaNoneSkipFirst);
+    NSParameterAssert(context);
+    CGContextConcatCTM(context, CGAffineTransformIdentity);
+    CGContextDrawImage(context, CGRectMake(0,
+                                           0,
+                                           frameWidth,
+                                           frameHeight),
+                       image);
+    CGColorSpaceRelease(rgbColorSpace);
+    CGContextRelease(context);
+    CVPixelBufferUnlockBaseAddress(pxbuffer, 0);
+    return pxbuffer;
+}
+
+// pixBuffer
+
 
 //crc精确提取指纹
 - (void)crcFingerImage:(UIImage *)image{
